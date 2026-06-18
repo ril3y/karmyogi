@@ -11,6 +11,13 @@
 //
 //  - 'send-response' (simple): send one line, wait for `ok`/`error`, repeat.
 //
+//  - 'line-mode' (TinyG): keep at most N whole LINES in flight (default 4),
+//    independent of byte count. This is TinyG's recommended line-mode flow
+//    control — the host sends a small fixed number of lines ahead and replenishes
+//    one line per response. (TinyG acks each line with a `{"r":…,"f":[…]}` JSON
+//    footer; the controller translates that footer's status code into the `ok`/
+//    `error:N` token this streamer counts, so the line-counting works unchanged.)
+//
 // The streamer is transport-agnostic: it is given an async `writeLine` and is
 // fed response lines via `onResponse(line)`. Status reports (`<...>`) and
 // pushed messages are ignored for accounting.
@@ -19,7 +26,10 @@
 export const GRBL_RX_BUFFER = 128
 export const RX_BUFFER_LIMIT = GRBL_RX_BUFFER - 1 // 127 usable
 
-export type StreamMode = 'char-counting' | 'send-response'
+/** Default number of whole lines kept in flight in 'line-mode' (TinyG). */
+export const DEFAULT_MAX_INFLIGHT_LINES = 4
+
+export type StreamMode = 'char-counting' | 'send-response' | 'line-mode'
 
 export interface StreamerOptions {
   mode?: StreamMode
@@ -27,6 +37,11 @@ export interface StreamerOptions {
   writeLine: (line: string) => Promise<void>
   /** RX buffer limit override (defaults to 127). */
   rxBufferLimit?: number
+  /**
+   * Max whole lines in flight for 'line-mode' (defaults to 4). Ignored by the
+   * other modes.
+   */
+  maxInFlightLines?: number
   /**
    * Called when a queued line is acknowledged with `ok`. `index` is the line's
    * 0-based position within the FULL program (i.e. it already includes any
@@ -58,6 +73,7 @@ interface PendingLine {
 export class Streamer {
   readonly mode: StreamMode
   private readonly rxLimit: number
+  private readonly maxLines: number
   private readonly writeLine: (line: string) => Promise<void>
 
   private queue: string[] = []
@@ -82,6 +98,7 @@ export class Streamer {
     this.opts = opts
     this.mode = opts.mode ?? 'char-counting'
     this.rxLimit = opts.rxBufferLimit ?? RX_BUFFER_LIMIT
+    this.maxLines = Math.max(1, opts.maxInFlightLines ?? DEFAULT_MAX_INFLIGHT_LINES)
     this.writeLine = opts.writeLine
   }
 
@@ -191,6 +208,10 @@ export class Streamer {
         if (this.mode === 'send-response') {
           // Only one line in flight at a time.
           if (this.pending.length > 0) break
+        } else if (this.mode === 'line-mode') {
+          // TinyG line-mode: cap the number of whole lines in flight (byte count
+          // is irrelevant here — TinyG paces by lines, not the GRBL RX buffer).
+          if (this.pending.length >= this.maxLines) break
         } else {
           // char-counting: respect the RX buffer ceiling. Always allow at
           // least one line through even if it alone exceeds the limit.

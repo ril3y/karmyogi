@@ -11,6 +11,7 @@ export type ControllerKind =
   | 'grbl'
   | 'fluidnc'
   | 'grblhal'
+  | 'tinyg'
   | 'marlin'
   | 'smoothieware'
   | 'masso'
@@ -46,9 +47,18 @@ export type Transport = 'webserial'
  *  - `smoothie` — settings live in the `config` file (`config-get` / `config-set`).
  *  - `masso`    — settings live entirely on the controller's own touchscreen; the
  *                 host has no editable-settings channel at all (offline/export target).
+ *  - `tinyg`    — settings are TinyG JSON/`$`-config tokens (`$xvm`, `{"xvm":…}`),
+ *                 read/written per-token or per-group, not a GRBL `$N=` table.
  *  - `none`     — no host-editable machine settings over this connection (lasers).
  */
-export type SettingsModel = 'grbl' | 'grblhal' | 'marlin' | 'smoothie' | 'masso' | 'none'
+export type SettingsModel =
+  | 'grbl'
+  | 'grblhal'
+  | 'tinyg'
+  | 'marlin'
+  | 'smoothie'
+  | 'masso'
+  | 'none'
 
 /**
  * How a controller reports live machine status (state + position) so the serial
@@ -56,9 +66,11 @@ export type SettingsModel = 'grbl' | 'grblhal' | 'marlin' | 'smoothie' | 'masso'
  *  - `grbl`   — `?` realtime byte → `<Idle|MPos:…>` report (GRBL family).
  *  - `marlin` — no GRBL `?`; poll `M114` for position (and `M105` for temps); the
  *               reply is an `ok`-terminated `X:.. Y:.. Z:..` line, not `<...>`.
+ *  - `tinyg`  — JSON protocol: status arrives as `{"sr":{posx,…,stat}}` objects
+ *               (auto + on-demand via `{"sr":null}`); acks are `{"r":…,"f":[…]}`.
  *  - `none`   — no host status channel (proprietary controllers / Masso).
  */
-export type StatusDialect = 'grbl' | 'marlin' | 'none'
+export type StatusDialect = 'grbl' | 'marlin' | 'tinyg' | 'none'
 
 /**
  * The concrete protocol differences the serial transport branches on, captured as
@@ -137,6 +149,13 @@ export interface ControllerProfile {
   capabilities: Capabilities
   /** Does this firmware speak the GRBL dialect (so our streaming path works)? */
   grblCompatible: boolean
+  /**
+   * Can karmyogi drive this controller over a LIVE connection today? Defaults to
+   * {@link grblCompatible} when omitted. Set explicitly for firmware we support
+   * live via a NON-GRBL adapter (TinyG's JSON protocol) — it is not GRBL
+   * compatible, but the controller speaks it through a dedicated dialect.
+   */
+  liveConnect?: boolean
   /** How well we actually support it today. */
   supported: SupportLevel
   transport: Transport
