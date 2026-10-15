@@ -1,16 +1,26 @@
 # CLAUDE.md — karmyogi
 
-> Guidance for Claude Code (and humans) working in this repository.
-> Read this first, then `plan.md` for the phased, parallel-agent build plan.
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+> Read this first, then `plan.md` for the original phased build plan and the
+> still-relevant FUTURE specs (camera vision §7, machine abstraction §8).
+> NOTE: `plan.md` is the *original* aspirational plan — the **"Current
+> architecture (as built)"** section below is the authoritative map of what
+> exists today; the app has grown well past plan.md's panel list.
 
 ## What this is
 
 **karmyogi** is a browser-based, multipurpose control + CAD/CAM workbench for a
-hobby/desktop **3-axis GRBL machine** (CNC carving, engraving, pen-plotting,
-auto-soldering, and PCB isolation routing/drilling). It runs entirely in the
-browser, talks to the machine's GRBL controller over USB via the **Web Serial
-API**, visualizes toolpaths and the machine bed in **3D**, and presents a fully
-**dockable / floatable / resizable** panel UI.
+hobby/desktop **3-axis GRBL machine**. It started as CNC carving / engraving /
+pen-plotting / auto-soldering / PCB and has grown into **~18 CAM "modes"**
+(each a dockable panel): 2D/3D Carving, Writing, Signature, Soldering, Screw
+Fitting, Bore/Drill/Hole, PCB, Glue Dispense, Pick & Place, 3D Printing (FDM
+slicer), Laser Cutting, Welding, Spring Coiling, Camera/vision, plus an **AI
+G-code** assistant. It runs entirely in the browser, talks to the machine over
+USB **Web Serial** (also BLE / WebSocket / a mock transport), visualizes
+toolpaths and the bed in **3D**, and presents a fully **dockable / floatable /
+resizable** panel UI. It is now also a real **SaaS**: Firebase auth/login, an
+admin dashboard, i18n + per-locale SEO, gamepad control, and a PWA self-updater.
 
 It is the **web successor** to the Qt/C++ desktop fork `hjLabs.in_Candle`.
 Intended to be hosted as a static SaaS at a subdomain, e.g. `karmyogi.hjlabs.in`.
@@ -45,8 +55,10 @@ status, sender). The Qt repo also has `tools/handwriting/` — a python3.13
 pipeline that turns a photographed template into a custom single-stroke font
 JSON (consumed by the Writing mode); keep using it as-is.
 
-A copy of the key reference files lives in `reference/` for offline lookup, but
-the Qt repo is the source of truth.
+A copy of the key reference files lives in `reference/` (`cadcam/`, `cam/`,
+`handwriting/`) for offline lookup — **on this machine that is the source of
+truth**, since the original Qt repo path (`/home/hemang/...`) is a Linux path
+that does not exist here.
 
 ### UI/UX inspiration: cncjs (DESIGN/LOOKS reference only)
 [**cncjs**](https://github.com/cncjs/cncjs) is a **visual design reference only** — we do
@@ -134,16 +146,76 @@ an explicit `Owns:` directory/file list and a `Depends on:` list, and groups the
 into "parallel batches" that can run concurrently. The orchestrator integrates
 shared wiring (the app shell / dockview registry) between batches.
 
+## Current architecture (as built) — authoritative map
+
+Three independent pillars + a shell, exactly as `plan.md` intended, but much wider:
+
+- **`src/core/` — pure TS CAD/CAM core (NO React/DOM/three).** The ported Qt
+  algorithms (`geometry`, `entity`, `toolpath` via `cam.ts`, `gcodeEmitter`,
+  `offset`, `dxf`, `gerber`/`excellon`/`pcbCam`, `soldering`, `centerline`/
+  `outlineFont`/`fontLibrary`/`hersheyData`) **plus** many newer generators:
+  `slicer` (FDM), `laser`/`laserCam`/`laserImage`, `springCoiling`, `screwDriving`,
+  `drilling`, `cutout`, `glue`, `pickPlace`, `nesting`, `heightmap`, `carve3d`,
+  `meshImport` (STL/STEP via occt-import-js), `simulation`, `materials`/`stock`,
+  `cameraCalib` (homography/DLT), `aiGcode`. Heavy ones run in **Web Workers**
+  (`carve3d.worker.ts`, `slicer.worker.ts`). Keep this dir UI-independent.
+- **`src/serial/` — transport + GRBL controller (NO UI).** `controller.ts` is the
+  service the app talks to; it delegates over a **pluggable transport**: `usbPort`
+  (Web Serial), `blePort` (Web Bluetooth), `wsPort` (WebSocket), `mockPort` (no
+  hardware). `streamer`/`status`/`realtime`/`settings` implement GRBL streaming;
+  `dialect.ts` + `store/machineProfile.ts` are the start of the §8 multi-controller
+  abstraction (GRBL is the default).
+- **`src/viewer/` — three.js / @react-three/fiber scene (no business logic).**
+  `Viewer.tsx` + bed/toolpath/tool-marker/stock/job/placement-gizmo, the live
+  `CameraBedPlane` overlay (§7.9), per-mode scenes (`SolderScene`, `SpringScene`),
+  and `gcodeToPolylines`.
+- **`src/panels/` — one dockview panel per file (UI only; calls core+store+serial).**
+  ~18 mode panels + Controller/Console/Program/Visualizer/Motion/Probe.
+- **`src/store/` — zustand slices** (one file per concern; ~30 of them). The barrel
+  `store/index.ts` is **orchestrator-owned** — re-exports each slice. `persist.ts`
+  is the localStorage persistence helper used across slices.
+- **`src/app/` — the shell** (`shell.tsx`, `App.tsx`, dockview wiring) +
+  **`panelRegistry.ts`** (orchestrator-owned). Every panel is `React.lazy()`-loaded
+  and wrapped in its own `<ErrorBoundary>` + `<Suspense>`, so unopened modes stay
+  out of the entry chunk and one panel crashing (bad DXF/STL/Gerber, WebGL/WASM
+  failure) never white-screens the SPA. `MobileShell.tsx` is the narrow-width
+  fallback. **To add a panel, edit `panelRegistry.ts`** in three places: `lazyPanels`,
+  `availablePanels`/`TAB_TITLES`, and the `tab.*` i18n call site `TAB_TITLE_KEYS`.
+- **Cross-cutting:** `src/auth/` (Firebase login, Google One-Tap, grace gate),
+  `src/admin/` (admin dashboard), `src/camera/` (calibration/tracking/recorder),
+  `src/i18n/` (translations + per-tab titles), `src/pwa/` (self-update manager that
+  defers reload while a job is streaming). Vendor code-split into `vendor-three`,
+  `vendor-firebase`, `vendor-occt`, `vendor-clipping`, etc. (see `vite.config.ts`).
+
+### i18n is mandatory
+User-facing strings go through `t('some.key', 'English fallback')` from `src/i18n`.
+The extractor (`npm run i18n:check`, `scripts/i18n-check.mjs`) statically scans for
+those literal calls — so the **key and English fallback must be string literals**,
+not variables. It skips `src/i18n/` itself; that's why tab-title `t()` call sites
+live in `src/app/panelRegistry.ts`.
+
 ## Build / run / host
 
 ```bash
 npm install
-npm run dev          # Vite dev server on localhost:5185 (Web Serial works on localhost)
-npm run build        # -> dist/ static files (deploy-time only)
+npm run dev          # Vite dev server on localhost:5185 (Web Serial + camera work on localhost)
+npm run build        # tsc --noEmit && vite build -> dist/ static files
 npm run preview      # serve the built app
 npm run typecheck    # tsc --noEmit (types only — there are NO unit tests; verify via Playwright)
+npm run i18n:check   # static-extract t('key','English') calls; flag missing/orphan locale keys
 # deploy: push dist/ to Cloudflare Pages (see docs/deploy.md). HTTPS is automatic.
+
+# Camera (getUserMedia) and Web Serial need a SECURE CONTEXT. localhost is secure;
+# plain http://<lan-ip> is NOT. To use the camera/Serial from another LAN device:
+HTTPS=1 npm run dev -- --host 0.0.0.0   # then open https://<lan-ip>:5185, accept the self-signed cert
 ```
+
+Dev-only Vite plugins (in `vite.config.ts`, all plain `.mjs`, kept out of the app
+tsconfig): `vite-camera-plugin` (receives camera frames), `vite-machine-plugin`
+(a **machine bridge** relaying this browser's GRBL machine to the server so an
+agent can read live state / queue commands), `vite-i18n-seo` (build-only: emits a
+crawlable `/<locale>/` page per language + hreflang + sitemap). `build-info.json`
+is emitted at the dist root for the in-app PWA staleness check.
 
 ## Conventions / guardrails
 
@@ -156,12 +228,26 @@ npm run typecheck    # tsc --noEmit (types only — there are NO unit tests; ver
 
 ## Status
 
-- [x] Repo created; CLAUDE.md + plan.md written.
-- [x] Phase 0 — scaffold (Vite+React19+TS strict), dockview shell, theme, 3D bed, responsive desktop⇄mobile shell.
-- [x] Batch A — W1 GRBL serial transport + mock, W2 CAD/CAM core (geometry/entity/toolpath/gcodeEmitter/offset/cam/dxf), W3 3D viewer.
-- [x] Orchestrator glue — `grbl` controller service, console/grblSettings stores, persistence, auto-connect, continuous (press-hold) jog.
-- [x] Batch B — Controller (DRO/jog/overrides), Console (MDI/macros), Coordinates (G54–59/zero), Program (load/stream), Visualizer.
-- [x] W11 — Motion / GRBL-settings editor (grouped, described, range/corruption-validated, Sync + Save + factory reset).
-- [x] Batch C — W7 Wood CAD/CAM (DXF→engrave/profile/pocket), W8 Writing (single-stroke font + custom JSON), W9 Auto-soldering (Free-Z/Touch-Z table + feeder), W10 PCB (Gerber-ZIP package + Excellon → isolation/drill/cutout).
-- [x] Batch D — global UI zoom, layout persistence, theme persistence, PWA/offline, Cloudflare deploy config (`public/_redirects`, `_headers`, `docs/deploy.md`).
-- All verified in the browser via Playwright; `tsc --noEmit` clean. No unit tests by design.
+The original phased build (Phase 0 → Batch A–D from `plan.md`) is **complete and
+shipped**: scaffold, GRBL serial + mock, pure CAD/CAM core, 3D viewer, the core
+panels (Controller/Console/Coordinates/Program/Visualizer), the Motion/`$`-settings
+editor, the first CAM modes (Carving/Writing/Soldering/PCB), and Batch-D polish
+(global zoom, layout/theme persistence, PWA/offline, Cloudflare deploy).
+
+Built since (beyond the original plan):
+- **Many more CAM modes:** 3D Printing (FDM slicer), Laser Cutting, Welding,
+  Spring Coiling, Screw Fitting, Bore/Drill/Hole, Glue Dispense, Pick & Place,
+  Signature, AI G-code assistant. STL/STEP import (occt-import-js) + 3D carving.
+- **More transports:** BLE + WebSocket alongside USB Web Serial and the mock; the
+  start of the multi-controller abstraction (`dialect.ts` + `machineProfile`).
+- **Camera/vision:** calibration sheet, homography bed-tracking, live camera→3D
+  bed overlay, recorder (§7.9 of `plan.md` partly landed; full auto-setup parked).
+- **SaaS + polish:** Firebase auth/login, admin dashboard, i18n + per-locale SEO,
+  gamepad control (rebind UI, 3D model, diagnostic), PWA self-update manager.
+
+Still **parked** (specs live in `plan.md`): full one-button camera "auto-setup &
+carve" (§7), the digital-twin machine model (§7.10), and the broader controller /
+machine-type / axis-layout abstraction (§8).
+
+Everything verified in the browser via Playwright; `tsc --noEmit` clean. No unit
+tests by design.
