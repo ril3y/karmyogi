@@ -40,6 +40,8 @@ import '../styles/motion.css'
  *                          resolves `settingsStyle: 'named'` and gets the
  *                          named-settings editor (`NamedSettingsEditor`:
  *                          `$path/name=value` rows, YAML config note).
+ *  - `tinyg`            → an honest TinyG view (settings are JSON / `$` tokens:
+ *                          `$$` dumps all, `$xvm` reads, `$xvm=…` or `{"xvm":…}` writes).
  *  - `marlin`           → an honest M-code view (settings live in EEPROM).
  *  - `smoothie`         → an honest config-file view (`config-get` / `config-set`).
  *  - `masso`            → an honest "managed on-device / offline-export" notice.
@@ -58,6 +60,8 @@ export function MotionPanel() {
       if (dialect.supportsNamedSettings) return <NamedSettingsEditor profile={profile} />
       return <GrblSettingsEditor profile={profile} />
     }
+    case 'tinyg':
+      return <TinyGSettingsView profile={profile} />
     case 'marlin':
       return <MarlinSettingsView profile={profile} />
     case 'smoothie':
@@ -1214,6 +1218,111 @@ function NoSettingsView({ profile }: { profile: ControllerProfile }) {
  * "report current settings" button (which streams into the Console), and list the
  * common setter M-codes for reference. No fake editor.
  */
+/**
+ * `settingsModel: 'tinyg'` — TinyG / g2core stores its config as named tokens
+ * (`xvm` = X velocity max, `1ma` = motor-1 axis map, …), addressed in text mode
+ * (`$xvm`, group `$x`, `$sys`) or JSON (`{"xvm":16000}`). There is no GRBL `$N=`
+ * numeric table, so render an honest view: a button to dump everything (`$$`)
+ * into the Console plus a token reference. Values stream into / are set from the
+ * Console panel (both `$token` text and `{"token":value}` JSON are accepted).
+ */
+function TinyGSettingsView({ profile }: { profile: ControllerProfile }) {
+  const t = useT()
+  const connection = useMachine((s) => s.connection)
+  const connected = connection === 'connected'
+
+  const send = (line: string) => {
+    grbl.send(line).catch(() => {
+      /* surfaced via console */
+    })
+  }
+
+  // A few common TinyG config tokens (token → human description).
+  const tokens: Array<[string, string]> = [
+    ['$sys', t('motion.tinyg.sys', 'system group (units, switches, JSON/status verbosity)')],
+    ['$x', t('motion.tinyg.x', 'X axis group (vel max, feed max, travel max, jerk)')],
+    ['$y', t('motion.tinyg.y', 'Y axis group')],
+    ['$z', t('motion.tinyg.z', 'Z axis group')],
+    ['$1', t('motion.tinyg.m1', 'motor 1 (step angle, travel/rev, microsteps, map)')],
+    ['$2', t('motion.tinyg.m2', 'motor 2')],
+    ['$3', t('motion.tinyg.m3', 'motor 3')],
+    ['$xvm', t('motion.tinyg.xvm', 'X velocity maximum (mm/min)')],
+    ['$xtm', t('motion.tinyg.xtm', 'X travel maximum (mm)')],
+  ]
+
+  return (
+    <div className="mo-panel" aria-label={t('motion.aria.panel', 'Motion and controller settings')}>
+      <section className="mo-section">
+        <h4>
+          {t('motion.heading.settingsForLabel', '{label} settings', { label: profile.label })}
+        </h4>
+        <div className="mo-alert" role="status">
+          {t(
+            'motion.tinyg.notice',
+            'TinyG stores its configuration as named tokens, not GRBL `$N=` numbers. Dump everything with $$, read a token or group with $xvm / $x, and set a value as $xvm=16000 (text) or {"xvm":16000} (JSON) — both are accepted in the Console.',
+          )}
+        </div>
+        <div className="mo-row">
+          <button
+            type="button"
+            className="mo-btn primary"
+            disabled={!connected}
+            onClick={() => send('$$')}
+            title={
+              connected
+                ? t('motion.tinyg.dump.title', 'Send $$ — dump all settings into the Console')
+                : t('motion.connectFirst', 'Connect first')
+            }
+          >
+            {t('motion.tinyg.dump.label', '⤓ Dump all settings ($$)')}
+          </button>
+          <span className="mo-grow" />
+          {!connected && (
+            <span className="mo-status">{t('motion.connectFirst', 'Connect first')}</span>
+          )}
+        </div>
+        <div className="mo-note">
+          {t(
+            'motion.tinyg.consoleHint',
+            'Dumped values stream into the Console panel. Set a value by typing it there, e.g. $xvm=16000 or {"xvm":16000}. Homing is G28.2 X0 Y0 Z0; clear an alarm with {"clear":null}.',
+          )}
+        </div>
+      </section>
+
+      <section className="mo-section">
+        <h5 className="mo-group">{t('motion.tinyg.ref.heading', 'Config token reference')}</h5>
+        <div className="mo-table" role="table" aria-label={t('motion.tinyg.ref.heading', 'Config token reference')}>
+          {tokens.map(([tok, desc]) => (
+            <div className="mo-rowitem" role="row" key={tok}>
+              <div className="mo-cell mo-key">
+                <span className="mo-num">{tok}</span>
+                <span className="mo-desc">{desc}</span>
+              </div>
+              <div className="mo-cell mo-edit">
+                <button
+                  type="button"
+                  className="mo-btn"
+                  disabled={!connected}
+                  onClick={() => send(tok)}
+                  title={t('motion.tinyg.sendTok.title', 'Send {tok} to the controller', { tok })}
+                  aria-label={t('motion.tinyg.sendTok.aria', 'Send {tok}', { tok })}
+                >
+                  ▷
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="mo-section">
+        <h5 className="mo-group">{t('motion.cap.heading', 'Capabilities')}</h5>
+        <CapabilitySummary caps={profile.capabilities} />
+      </section>
+    </div>
+  )
+}
+
 function MarlinSettingsView({ profile }: { profile: ControllerProfile }) {
   const t = useT()
   const connection = useMachine((s) => s.connection)

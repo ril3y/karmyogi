@@ -25,6 +25,7 @@ import {
   type ResolvedDialect,
 } from './dialect'
 import { parseSettingLine, writeSettingCommand } from './settings'
+import { parseTinyGLine, tinygInitCommands } from './tinyg'
 import { useMachine } from '../store/machine'
 import { useProgram } from '../store/program'
 import { useConsole } from '../store/console'
@@ -373,8 +374,13 @@ class GrblController {
         cursorRaf = null
         useProgram.getState().setCursor?.(pendingCursor)
       }
+      // TinyG paces by whole lines (its JSON line-mode flow control), not by the
+      // GRBL 127-byte RX buffer, so it streams in 'line-mode'. Everything else
+      // keeps the high-throughput char-counting default.
+      const defaultStreamMode: StreamMode =
+        this.dialect.status === 'tinyg' ? 'line-mode' : 'char-counting'
       this.streamer = new Streamer({
-        mode: opts?.streamMode ?? 'char-counting',
+        mode: opts?.streamMode ?? defaultStreamMode,
         writeLine: (l) => conn.writeLine(l),
         onProgress: (completed) => {
           pendingCursor = completed - 1
@@ -437,6 +443,22 @@ class GrblController {
           reportSerialConnected()
         } catch {
           /* tracking is best-effort and must never affect the connection */
+        }
+      }
+      // TinyG: put the controller into a known, machine-parseable state (JSON
+      // mode + footer responses + verbose status reports with the fields we
+      // parse). TinyG parses any `{`-leading line as JSON even if it booted in
+      // text mode. Each init line gets one `{"r":…}` response — pre-count them so
+      // their responses are swallowed silently (no console spam), exactly like an
+      // automatic status poll's reply (see handleLine's tinyg branch).
+      if (this.dialect.status === 'tinyg') {
+        for (const cmd of tinygInitCommands()) {
+          this.pendingStatusAcks++
+          try {
+            await conn.writeLine(cmd)
+          } catch {
+            this.pendingStatusAcks = Math.max(0, this.pendingStatusAcks - 1)
+          }
         }
       }
       this.startStatusPolling()
@@ -840,6 +862,47 @@ class GrblController {
         this.pendingStatusAcks--
         return
       }
+    } else if (this.dialect.status === 'tinyg') {
+      // TinyG / g2core JSON protocol. Every line is handled here and RETURNS —
+      // none of it falls through to the GRBL `$N=`/`ok` accounting below (which
+      // would mis-parse JSON). See src/serial/tinyg.ts.
+      const parsed = parseTinyGLine(line)
+      // Non-JSON output: text-mode prompts, a `$$` settings dump, banners we don't
+      // model. Echo it (the operator can read it) — it is never an ack.
+      if (parsed.kind === 'other') {
+        useConsole.getState().push('recv', line)
+        return
+      }
+      // An unsolicited `{"sr":…}` status report: apply it and consume it silently,
+      // exactly like a GRBL `<...>` report (no console echo, not an ack).
+      if (parsed.kind === 'status') {
+        useMachine.getState().applyStatus(parsed.report)
+        return
+      }
+      // A command response `{"r":…,"f":[rev,statusCode,…]}` — TinyG's per-line ack.
+      // Apply any status report it embedded first.
+      if (parsed.report) useMachine.getState().applyStatus(parsed.report)
+      // Swallow the response that acks an AUTOMATIC status poll or a connect-time
+      // init command (pre-counted in pendingStatusAcks): no console echo, not a
+      // stream/jog ack — so neither spams the console. Only while NOT streaming
+      // (during a stream the poll is gated off, so every response is the program's).
+      if (this.pendingStatusAcks > 0 && !this.streamer?.isRunning) {
+        this.pendingStatusAcks--
+        return
+      }
+      const isError = parsed.statusCode !== 0
+      // Suppress the high-volume routine acks during a stream; always show errors
+      // and manual-command responses.
+      if (!(this.streamer?.isRunning && !isError)) {
+        useConsole.getState().push(isError ? 'error' : 'recv', line)
+      }
+      // Free one in-flight jog if any (TinyG jogs are plain G91 moves that don't
+      // use the gate, but keep the accounting consistent and harmless).
+      if (this.inflightJogs > 0 && !this.streamer?.isRunning) this.inflightJogs--
+      // Translate the footer's status code into the ok/error token the streamer
+      // counts, so line-mode flow control advances on each acknowledged line.
+      this.streamer?.onResponse(isError ? `error:${parsed.statusCode}` : 'ok')
+      return
     }
     // Capture `$N=val` setting lines (from a `$$` dump) into the settings store.
     const setting = parseSettingLine(line)
@@ -1004,13 +1067,24 @@ class GrblController {
   private get isGrblFamily(): boolean {
     return this.dialect.status === 'grbl' && this.dialect.dollarSettings
   }
-  /** Home all axes. GRBL family: `$H`. Marlin/Smoothie: `G28`. */
-  home = () => this.send(this.isGrblFamily ? '$H' : 'G28')
+  /** Home all axes. GRBL family: `$H`. TinyG: `G28.2 X0 Y0 Z0`. Marlin/Smoothie: `G28`. */
+  home = () => this.send(this.homeCommand())
+  private homeCommand(): string {
+    if (this.isGrblFamily) return '$H'
+    if (this.dialect.status === 'tinyg') return 'G28.2 X0 Y0 Z0'
+    return 'G28'
+  }
   /**
-   * Clear an alarm / unlock. GRBL family: `$X`. Marlin/Smoothie have no soft-lock
-   * alarm to clear, so this clears the firmware kill state via `M999`.
+   * Clear an alarm / unlock. GRBL family: `$X`. TinyG: `{"clear":null}` clears the
+   * alarm/shutdown state. Marlin/Smoothie have no soft-lock alarm, so `M999`
+   * clears the firmware kill state.
    */
-  unlock = () => this.send(this.isGrblFamily ? '$X' : 'M999')
+  unlock = () => this.send(this.unlockCommand())
+  private unlockCommand(): string {
+    if (this.isGrblFamily) return '$X'
+    if (this.dialect.status === 'tinyg') return '{"clear":null}'
+    return 'M999'
+  }
 
   // --- GRBL `$`-settings (Motion panel) ---
   /** Request the full settings dump (`$$`). Results land in useGrblSettings. */

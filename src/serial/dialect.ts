@@ -12,6 +12,7 @@
 import type { ControllerKind, Dialect, StatusDialect } from '../machine/types'
 import type { StatusReport, Vec3 } from './status'
 import { parseStatusReport } from './status'
+import { parseTinyGLine, TINYG_STATUS_REQUEST } from './tinyg'
 
 /**
  * How a firmware ADDRESSES its host-editable `$`-settings over the wire:
@@ -131,13 +132,34 @@ export const FLUIDNC_DIALECT: ResolvedDialect = withCapabilities({
 })
 
 /**
+ * TinyG / g2core — JSON protocol dialect. Status is parsed from `{"sr":…}` /
+ * `{"r":…}` JSON (not GRBL `<...>`), so `status: 'tinyg'` and the derived
+ * `supportsRealtimeStatus` is false (status is a `{"sr":null}` LINE request, not
+ * the free `?` byte) — which routes the controller's status poll through the
+ * line-command path (gated off mid-stream, where TinyG's auto-reports cover
+ * motion). Jog is a plain G91 move (no GRBL `$J=`); there is no `$$` numeric
+ * settings channel (`settingsStyle: 'none'`). TinyG DOES honour `!`/`~`/`%`/0x18
+ * realtime bytes, so `realtimeBytes` stays true and reset is the 0x18 byte.
+ */
+export const TINYG_DIALECT: ResolvedDialect = withCapabilities({
+  status: 'tinyg',
+  realtimeBytes: true,
+  lineEnding: '\n',
+  jogCommand: 'g91-move',
+  dollarSettings: false,
+  reset: 'grbl-0x18',
+  settingsStyle: 'none',
+})
+
+/**
  * Resolve a profile's (possibly partial) dialect against the GRBL defaults.
- * Pass the controller `kind` where known so FluidNC resolves to its named-
- * settings dialect; without it (legacy call sites) everything keeps resolving
+ * Pass the controller `kind` where known so FluidNC / TinyG resolve to their own
+ * base dialect; without it (legacy call sites) everything keeps resolving
  * exactly as before — GRBL-shaped, numeric `$`-settings.
  */
 export function resolveDialect(d?: Dialect, kind?: ControllerKind | string): ResolvedDialect {
-  const base = kind === 'fluidnc' ? FLUIDNC_DIALECT : GRBL_DIALECT
+  const base =
+    kind === 'fluidnc' ? FLUIDNC_DIALECT : kind === 'tinyg' ? TINYG_DIALECT : GRBL_DIALECT
   if (!d) return base
   const dollarSettings = d.dollarSettings ?? base.dollarSettings
   return withCapabilities({
@@ -156,10 +178,13 @@ export function resolveDialect(d?: Dialect, kind?: ControllerKind | string): Res
 /**
  * The status-query command for a dialect, if it is line-based (not a realtime
  * byte). GRBL uses the `?` realtime byte (handled separately), so it returns
- * null here. Marlin/RepRap/Smoothie poll `M114` (position). `none` has no query.
+ * null here. Marlin/RepRap/Smoothie poll `M114` (position); TinyG requests a
+ * JSON report with `{"sr":null}`. `none` has no query.
  */
 export function statusQueryLine(d: Pick<ResolvedDialect, 'status'>): string | null {
-  return d.status === 'marlin' ? 'M114' : null
+  if (d.status === 'marlin') return 'M114'
+  if (d.status === 'tinyg') return TINYG_STATUS_REQUEST
+  return null
 }
 
 /**
@@ -248,6 +273,12 @@ export function parseStatusForDialect(
   prevWco?: Vec3,
 ): StatusReport | undefined {
   if (d.status === 'marlin') return parseMarlinStatus(line)
+  if (d.status === 'tinyg') {
+    const parsed = parseTinyGLine(line)
+    if (parsed.kind === 'status') return parsed.report
+    if (parsed.kind === 'response') return parsed.report
+    return undefined
+  }
   if (d.status === 'none') return undefined
   return parseStatusReport(line, prevWco)
 }

@@ -86,6 +86,48 @@ export const CONTROLLER_PROFILES: Record<ControllerKind, ControllerProfile> = {
     settingsModel: 'grblhal',
     notes: 'GRBL successor (32-bit). GRBL-compatible dialect — full support.',
   },
+  tinyg: {
+    kind: 'tinyg',
+    label: 'TinyG / g2core',
+    machineType: 'cnc3',
+    // TinyG's default USB serial baud is 115200 (g2core USB is virtual-COM, baud
+    // is ignored there, but 115200 is the safe default for the original TinyG).
+    baud: 115200,
+    capabilities: {
+      axes: [...STANDARD_3AXIS],
+      hasSpindle: true,
+      hasLaser: false,
+      hasHoming: true,
+      hasProbe: true,
+    },
+    // NOT GRBL-compatible — TinyG speaks a JSON protocol, not GRBL's `<...>`/`ok`
+    // line protocol. But we DO support it live via a dedicated dialect (see
+    // src/serial/tinyg.ts), so `liveConnect` is true even though `grblCompatible`
+    // is false. The dialect below routes the serial layer to JSON parsing.
+    grblCompatible: false,
+    liveConnect: true,
+    supported: 'experimental',
+    transport: 'webserial',
+    // Settings are TinyG config tokens (`$xvm`, group `$x`, or JSON `{"xvm":…}`),
+    // not a GRBL `$N=` table — the Motion panel renders an honest TinyG view.
+    settingsModel: 'tinyg',
+    // The protocol deviations the serial transport branches on. `status: 'tinyg'`
+    // switches status parsing to JSON `{"sr":…}`/`{"r":…}`; jog is a plain G91
+    // move (no GRBL `$J=`); there is no `$$` numeric-settings channel. TinyG DOES
+    // honour `!`/`~`/`%`/0x18 realtime bytes, so `realtimeBytes` stays true and
+    // reset stays the 0x18 (Ctrl-X) byte.
+    dialect: {
+      status: 'tinyg',
+      realtimeBytes: true,
+      jogCommand: 'g91-move',
+      dollarSettings: false,
+      reset: 'grbl-0x18',
+    },
+    notes:
+      'Synthetos TinyG / g2core. JSON protocol over USB serial at 115200: streamed G-code is ' +
+      'acknowledged with {"r":…,"f":[…]} footers, status arrives as {"sr":…} reports, and !/~/%/Ctrl-X ' +
+      'realtime bytes work. Homing G28.2, jog via relative moves. Settings are JSON/$ tokens. Experimental.',
+  },
   marlin: {
     kind: 'marlin',
     label: 'Marlin',
@@ -272,6 +314,7 @@ export const CONTROLLER_LIST: ControllerProfile[] = [
   CONTROLLER_PROFILES.grbl,
   CONTROLLER_PROFILES.fluidnc,
   CONTROLLER_PROFILES.grblhal,
+  CONTROLLER_PROFILES.tinyg,
   CONTROLLER_PROFILES.marlin,
   CONTROLLER_PROFILES.smoothieware,
   CONTROLLER_PROFILES.masso,
@@ -292,6 +335,7 @@ const CONTROLLER_NOTES_KEYS: Record<ControllerKind, string> = {
   grbl: 'controller.grbl.notes',
   fluidnc: 'controller.fluidnc.notes',
   grblhal: 'controller.grblhal.notes',
+  tinyg: 'controller.tinyg.notes',
   marlin: 'controller.marlin.notes',
   smoothieware: 'controller.smoothieware.notes',
   masso: 'controller.masso.notes',
@@ -318,9 +362,10 @@ export function profileFor(kind: ControllerKind | string | null | undefined): Co
 
 /**
  * Can we attempt a real (non-mock) connection to this controller today?
- * GRBL-compatible firmware uses the streaming path; everything else (Ruida) is
- * honest about not being wired yet.
+ * GRBL-compatible firmware uses the GRBL streaming path; firmware with a
+ * dedicated non-GRBL adapter (TinyG) opts in via `liveConnect`. Everything else
+ * (Ruida, EzCAD, FSCUT) is honest about not being wired yet.
  */
 export function canLiveConnect(profile: ControllerProfile): boolean {
-  return profile.grblCompatible
+  return profile.liveConnect ?? profile.grblCompatible
 }
